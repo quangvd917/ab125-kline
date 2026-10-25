@@ -1,0 +1,5 @@
+# Copy to boards.local (git-ignored) and fill in your boards' MAC addresses.
+# ./flash.sh prints the MAC of every connected board.
+c3_supermini=aa:bb:cc:dd:ee:01
+wrover_2n2222=aa:bb:cc:dd:ee:02
+cyd=aa:bb:cc:dd:ee:03

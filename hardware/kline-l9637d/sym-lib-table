@@ -1,0 +1,4 @@
+(sym_lib_table
+  (version 7)
+  (lib (name "kline")(type "KiCad")(uri "${KIPRJMOD}/kline.kicad_sym")(options "")(descr "L9637D K-Line transceiver"))
+)

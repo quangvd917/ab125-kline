@@ -1,0 +1,25 @@
+# macOS / editors
+.DS_Store
+.vscode/
+.idea/
+
+# PlatformIO / Python
+.pio/
+.venv/
+__pycache__/
+
+# Local board MACs (see firmware/boards.local.example)
+firmware/boards.local
+
+# Firmware logs and screenshots made while testing
+firmware/kline-reader/logs/
+firmware/dashboard-cyd/*.png
+
+# KiCad local files
+hardware/**/*-backups/
+hardware/**/.history/
+hardware/**/*.kicad_prl
+hardware/**/fp-info-cache
+hardware/**/_autosave-*
+hardware/**/*.lck
+hardware/**/*.rpt
