@@ -5,6 +5,7 @@ Firmware chạy trên **ESP32-C3 SuperMini** cùng mạch [L9637D](../../docs/ha
 Firmware làm 3 việc:
 - Đánh thức ECU và đọc **bảng `0x17`** khoảng 7 lần mỗi giây. Xem [protocol.md](../../docs/protocol.md).
 - Phát WiFi **AB125** (mật khẩu `ab125kline`) kèm trang web đồng hồ tại `http://192.168.4.1`. API `GET /data` trả về JSON.
+- Đọc **mã lỗi** (bảng `0x74` lỗi hiện tại, bảng `0x73` lỗi đã lưu) khi vừa kết nối ECU và sau đó mỗi 30 giây. Mỗi chu kỳ chỉ đọc một trang, nên không làm chậm việc đọc RPM. Kết quả xem ở mục **Mã lỗi** trên trang web, hoặc qua `GET /dtc`. Chỉ đọc, không xóa lỗi. Xem [protocol.md](../../docs/protocol.md#mã-lỗi-dtc).
 - Gửi gói **ESP-NOW** `DashPacket` trên kênh 1 cho [dashboard CYD](../dashboard-cyd).
 
 Muốn đổi tên hoặc mật khẩu WiFi, sửa `AP_SSID` / `AP_PASS` trong `src/main.cpp`.
@@ -29,6 +30,11 @@ Muốn đổi tên hoặc mật khẩu WiFi, sửa `AP_SSID` / `AP_PASS` trong `
 ```
 Script kiểm tra MAC của board, khai báo trong `../boards.local` (xem [../flash.sh](../flash.sh)).
 
+## Trang mã lỗi
+Trên màn hình chính có ô **"Mã lỗi: …"**, bấm vào để mở trang chi tiết. Trang này chia hai mục **Đang xảy ra** và **Đã lưu trong ECU**. Mỗi lỗi hiện mã, mô tả tiếng Việt và số lần đèn FI nháy.
+
+Nút **Dữ liệu mẫu** hiện vài lỗi giả, gắn nhãn DEMO, để xem giao diện khi xe không có lỗi. Mục **Dữ liệu thô từ ECU** cho xem nguyên văn các trang ECU trả về.
+
 ## Đèn LED trạng thái (GPIO8 trên C3)
 | Đèn | Nghĩa |
 |---|---|
@@ -48,6 +54,7 @@ Các dòng báo lỗi:
 - **`Echo mismatch` / `Bad echo`:** không có tín hiệu K-Line. Thường do chưa bật khóa, thiếu 12V, hoặc thiếu 3.3V cho L9637D.
 - **`INIT FAIL, code=0`:** mạch chạy đúng nhưng ECU không trả lời. Trên bàn (chưa cắm xe) đây là kết quả đúng.
 - **`Lost connection`:** mất kết nối, firmware tự kết nối lại.
+- **`DTC current: none | stored: none`:** kết quả mỗi lần quét mã lỗi. Lần quét đầu tiên sau khi kết nối in thêm dữ liệu thô của từng trang (`DTC 74 p1: …`).
 
 **Ghi log ra file:**
 ```bash

@@ -40,11 +40,40 @@ static const char DASHBOARD_HTML[] PROGMEM = R"HTML(<!doctype html>
   .tile .v small { font-size:15px; color:var(--muted); font-weight:500; }
   .warn-t { color:var(--warn); } .bad-t { color:var(--bad); }
   .stale .speed, .stale .rpm, .stale .grid { opacity:.35; }
+  #dtcChip { display:flex; justify-content:space-between; align-items:center; width:100%;
+             background:var(--card); color:var(--text); border:0; border-radius:16px;
+             padding:14px 16px; font:inherit; font-size:16px; text-align:left; cursor:pointer; }
+  #dtcChip .s { font-weight:600; } #dtcChip .go { color:var(--muted); font-size:20px; }
+  .ok-t { color:var(--accent); }
   @media (orientation:landscape) {
-    body { display:grid; grid-template-columns:1.1fr 1fr; grid-template-rows:auto 1fr auto; }
+    body { display:grid; grid-template-columns:1.1fr 1fr; grid-template-rows:auto 1fr auto auto; }
     header { grid-column:1 / 3; }
-    .speed { grid-row:2 / 4; align-self:center; }
+    .speed { grid-row:2 / 5; align-self:center; }
   }
+
+  /* Fault code view (opened with #dtc so the back gesture closes it) */
+  #dtcView { position:fixed; inset:0; background:var(--bg); overflow-y:auto; display:none;
+             padding:calc(env(safe-area-inset-top) + 12px) 16px calc(env(safe-area-inset-bottom) + 24px); }
+  body.show-dtc #dtcView { display:block; }
+  .vhead { display:flex; align-items:center; gap:10px; margin-bottom:14px; }
+  .vhead h2 { flex:1; font-size:20px; }
+  .btn { background:var(--card); color:var(--text); border:0; border-radius:999px; padding:8px 14px;
+         font:inherit; font-size:14px; cursor:pointer; }
+  .btn.on { background:var(--warn); color:#1a1300; font-weight:600; }
+  .meta { color:var(--muted); font-size:13px; margin-bottom:14px; line-height:1.4; }
+  .demo-banner { display:none; background:#3a2a00; color:var(--warn); border-radius:12px;
+                 padding:10px 12px; font-size:14px; margin-bottom:14px; }
+  body.dtc-demo .demo-banner { display:block; }
+  .sec { font-size:13px; font-weight:600; letter-spacing:.06em; color:var(--muted); margin:18px 0 8px; }
+  .code { background:var(--card); border-radius:14px; padding:12px 14px; margin-bottom:10px;
+          display:grid; grid-template-columns:auto 1fr; gap:2px 14px; align-items:center; }
+  .code .num { grid-row:1 / 3; font-size:30px; font-weight:700; font-variant-numeric:tabular-nums; min-width:76px; }
+  .code.cur .num { color:var(--bad); } .code.past .num { color:var(--warn); }
+  .code .d { font-size:15px; } .code .b { font-size:13px; color:var(--muted); }
+  .empty { background:var(--card); border-radius:14px; padding:14px; color:var(--muted); font-size:15px; }
+  details { margin-top:22px; color:var(--muted); font-size:13px; }
+  details pre { white-space:pre-wrap; word-break:break-all; margin-top:8px; font-size:12px;
+                background:var(--card); border-radius:10px; padding:10px; -webkit-user-select:text; user-select:text; }
 </style>
 </head>
 <body class="stale">
@@ -60,6 +89,24 @@ static const char DASHBOARD_HTML[] PROGMEM = R"HTML(<!doctype html>
   <div class="tile"><div class="l">Bướm ga</div><div class="v" id="tps">--</div></div>
   <div class="tile"><div class="l">Khí nạp</div><div class="v" id="iat">--</div></div>
 </section>
+<button id="dtcChip" onclick="location.hash='dtc'">
+  <span>Mã lỗi: <span class="s" id="dtcSummary">đang đọc…</span></span><span class="go">›</span>
+</button>
+
+<div id="dtcView">
+  <div class="vhead">
+    <button class="btn" onclick="history.back()">‹ Quay lại</button>
+    <h2>Mã lỗi</h2>
+    <button class="btn" id="demoBtn" onclick="toggleDemo()">Dữ liệu mẫu</button>
+  </div>
+  <div class="demo-banner">DEMO: đây là dữ liệu mẫu, không phải lỗi thật của xe.</div>
+  <div class="meta" id="dtcMeta">Đang đọc mã lỗi từ ECU…</div>
+  <div class="sec">ĐANG XẢY RA</div><div id="dtcCurrent"></div>
+  <div class="sec">ĐÃ LƯU TRONG ECU</div><div id="dtcStored"></div>
+  <div class="meta" style="margin-top:18px">Chỉ đọc, không xóa lỗi. Đèn FI chỉ nháy được mã chính:
+    1 lần nháy dài = 10, 1 lần nháy ngắn = 1. Ý nghĩa mã theo bảng chung của Honda PGM-FI.</div>
+  <details><summary>Dữ liệu thô từ ECU</summary><pre id="dtcRaw">--</pre></details>
+</div>
 <script>
 const RPM_MAX = 10000;
 const $ = id => document.getElementById(id);
@@ -109,6 +156,95 @@ async function poll() {
   }
 }
 poll();
+
+// ---------------- Fault codes ----------------
+const DTC_TEXT = {
+  "01-01":"Cảm biến áp suất cổ hút (MAP): điện áp thấp",
+  "01-02":"Cảm biến áp suất cổ hút (MAP): điện áp cao",
+  "02-01":"Cảm biến MAP hoạt động bất thường (kiểm tra ống chân không)",
+  "07-01":"Cảm biến nhiệt độ nước làm mát: điện áp thấp",
+  "07-02":"Cảm biến nhiệt độ nước làm mát: điện áp cao",
+  "08-01":"Cảm biến vị trí bướm ga: điện áp thấp",
+  "08-02":"Cảm biến vị trí bướm ga: điện áp cao",
+  "09-01":"Cảm biến nhiệt độ khí nạp: điện áp thấp",
+  "09-02":"Cảm biến nhiệt độ khí nạp: điện áp cao",
+  "11-01":"Cảm biến tốc độ: mất tín hiệu",
+  "12-01":"Kim phun: lỗi mạch",
+  "18-01":"Cảm biến trục cam: mất tín hiệu",
+  "19-01":"Cảm biến trục khuỷu: mất tín hiệu",
+  "21-01":"Cảm biến oxy: hoạt động bất thường",
+  "23-01":"Bộ sấy cảm biến oxy: lỗi",
+  "29-01":"Van điều khiển gió không tải (IACV): lỗi mạch",
+  "33-02":"Bộ nhớ EEPROM của ECU: lỗi",
+  "54-01":"Cảm biến nghiêng đổ xe: điện áp thấp",
+  "54-02":"Cảm biến nghiêng đổ xe: điện áp cao",
+  "86-01":"Lỗi truyền thông nối tiếp"
+};
+const DTC_DEMO = { valid:true, age:4000, error:"", current:["08-01"], stored:["07-01","54-01"],
+                   raw:["(dữ liệu mẫu)"] };
+let dtcData = null, demo = false;
+
+function blinks(main) {
+  const long = Math.floor(main / 10), short = main % 10;
+  if (!long) return `Đèn FI nháy ${short} lần`;
+  return `Đèn FI nháy ${long} lần dài` + (short ? `, ${short} lần ngắn` : "");
+}
+
+function codeHtml(code, cls) {
+  const [m, s] = code.split("-").map(n => parseInt(n, 10));
+  const text = DTC_TEXT[code] || "Chưa rõ ý nghĩa";
+  return `<div class="code ${cls}"><div class="num">${m}-${s}</div>` +
+         `<div class="d">${text}</div><div class="b">${blinks(m)}</div></div>`;
+}
+
+function ago(ms) {
+  const s = Math.round(ms / 1000);
+  return s < 60 ? `${s} giây trước` : `${Math.round(s / 60)} phút trước`;
+}
+
+function renderDtc() {
+  const d = demo ? DTC_DEMO : dtcData;
+  document.body.classList.toggle("dtc-demo", demo);
+  $("demoBtn").classList.toggle("on", demo);
+  const sum = $("dtcSummary");
+  if (!d || !d.valid) {
+    sum.textContent = d && d.error ? "không đọc được" : "đang đọc…";
+    sum.className = "s warn-t";
+    $("dtcMeta").textContent = d && d.error ? `ECU không trả lời yêu cầu đọc mã lỗi (${d.error}).`
+                                            : "Đang đọc mã lỗi từ ECU…";
+    $("dtcCurrent").innerHTML = $("dtcStored").innerHTML = "";
+    $("dtcRaw").textContent = d && d.raw && d.raw.length ? d.raw.join("\n") : "--";
+    return;
+  }
+  const nCur = d.current.length, nOld = d.stored.length;
+  if (nCur) { sum.textContent = `⚠ ${nCur} lỗi đang xảy ra`; sum.className = "s bad-t"; }
+  else if (nOld) { sum.textContent = `${nOld} lỗi đã lưu`; sum.className = "s warn-t"; }
+  else { sum.textContent = "không có lỗi"; sum.className = "s ok-t"; }
+  if (demo) sum.textContent += " (DEMO)";
+
+  $("dtcMeta").textContent = `Cập nhật ${ago(d.age)}. ECU được đọc lại mỗi 30 giây.`;
+  $("dtcCurrent").innerHTML = nCur ? d.current.map(c => codeHtml(c, "cur")).join("")
+                                   : `<div class="empty">Không có lỗi</div>`;
+  $("dtcStored").innerHTML = nOld ? d.stored.map(c => codeHtml(c, "past")).join("")
+                                  : `<div class="empty">Không có lỗi</div>`;
+  $("dtcRaw").textContent = d.raw.length ? d.raw.join("\n") : "--";
+}
+
+function toggleDemo() { demo = !demo; renderDtc(); }
+
+function route() { document.body.classList.toggle("show-dtc", location.hash === "#dtc"); }
+window.addEventListener("hashchange", route);
+route();
+
+async function pollDtc() {
+  try {
+    const r = await fetch("/dtc", { cache:"no-store" });
+    dtcData = await r.json();
+  } catch (e) { /* keep the last result; the main status shows WiFi loss */ }
+  renderDtc();
+  setTimeout(pollDtc, 5000);
+}
+pollDtc();
 </script>
 </body>
 </html>

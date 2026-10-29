@@ -10,6 +10,7 @@
 ## Tính năng
 - Đọc **vòng tua, tốc độ, nhiệt độ máy, nhiệt độ khí nạp, độ mở bướm ga, điện áp ắc quy** khoảng 7 lần mỗi giây.
 - **Trang web trên điện thoại:** kết nối WiFi `AB125`, mở `http://192.168.4.1`. Không cần cài app.
+- **Đọc mã lỗi PGM-FI** (lỗi hiện tại và lỗi đã lưu) kèm mô tả tiếng Việt. Chỉ đọc, không xóa. ECU đã trả lời đúng cấu trúc trên xe thật. Riêng trường hợp xe có lỗi chưa được kiểm chứng, xem [protocol.md](docs/protocol.md#mã-lỗi-dtc).
 - **Dashboard màn CYD 2.8"** nhận dữ liệu không dây qua ESP-NOW: đồng hồ RPM, tốc độ, cảnh báo nhiệt độ và điện áp.
 - **Ghi log** dữ liệu thô ra file để phân tích.
 - Mạch giao tiếp **L9637D** tự làm được trên PCB 1 mặt. File KiCad có đủ schematic và PCB.

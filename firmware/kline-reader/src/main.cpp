@@ -158,12 +158,16 @@ bool wakeupECU() {
   return false;
 }
 
-int readTable(uint8_t table, uint8_t *buf, size_t maxLen) {
-  uint8_t req[5] = {0x72, 0x05, 0x71, table, 0};
+// Read request "72 05 <a> <b> <cks>": tables use a = 0x71, b = table;
+// fault codes use a = 0x74 (current) / 0x73 (stored), b = page.
+int readRequest(uint8_t a, uint8_t b, uint8_t *buf, size_t maxLen) {
+  uint8_t req[5] = {0x72, 0x05, a, b, 0};
   req[4] = checksum(req, 4);
   sendFrame(req, sizeof(req));
   return readFrame(buf, maxLen);
 }
+
+int readTable(uint8_t table, uint8_t *buf, size_t maxLen) { return readRequest(0x71, table, buf, maxLen); }
 
 void scanTables() {
   const uint8_t tables[] = {0x10, 0x11, 0x12, 0x13, 0x17, 0x20, 0x21, 0xD0, 0xD1};
@@ -210,18 +214,130 @@ void handleLiveData(const uint8_t *buf, int n) {
         " | raw " + hex(d, len));
 }
 
+// ---------------- Fault codes (read only, never cleared) ----------------
+// Layout from the HondaECU project: each page answers "74|73 <page> ?? m1 s1 m2 s2 m3 s3",
+// i.e. up to 3 codes per page as (main, sub) bytes, 00 = empty slot. Pages 1..11.
+// Not yet verified with a real fault on this bike: the raw pages are kept for checking.
+
+static const int DTC_PAGES = 11;
+static const int DTC_MAX = 16;
+static const uint32_t DTC_INTERVAL_MS = 30000;
+
+struct DtcList {
+  uint8_t count;
+  uint8_t codes[DTC_MAX][2];
+};
+
+struct DtcState {
+  bool valid;          // at least one complete sweep done
+  uint32_t updatedMs;  // when the last sweep finished
+  char error[32];      // why the last sweep stopped early, if it did
+  DtcList current;     // table 0x74
+  DtcList stored;      // table 0x73
+  uint8_t rawCount;
+  char raw[2 * DTC_PAGES][48];
+};
+
+DtcState dtc = {};
+portMUX_TYPE dtcMux = portMUX_INITIALIZER_UNLOCKED;
+
+static void addCode(DtcList &list, uint8_t main, uint8_t sub) {
+  for (int i = 0; i < list.count; i++)
+    if (list.codes[i][0] == main && list.codes[i][1] == sub) return;
+  if (list.count < DTC_MAX) {
+    list.codes[list.count][0] = main;
+    list.codes[list.count][1] = sub;
+    list.count++;
+  }
+}
+
+static String codeList(const DtcList &list) {
+  if (list.count == 0) return "none";
+  String s;
+  char b[8];
+  for (int i = 0; i < list.count; i++) {
+    snprintf(b, sizeof(b), "%02d-%02d", list.codes[i][0], list.codes[i][1]);
+    s += (i ? " " : "") + String(b);
+  }
+  return s;
+}
+
+// The sweep reads one page per polling cycle so live data keeps flowing.
+struct DtcSweep {
+  int step = -1;  // -1 idle, 0..21 = page index (0x74 pages first, then 0x73)
+  bool verbose = false;
+  uint32_t lastEnd = 0;
+  DtcState work = {};
+};
+
+static void startDtcSweep(DtcSweep &s, bool verbose) {
+  s.step = 0;
+  s.verbose = verbose;
+  s.work = {};
+}
+
+static void finishDtcSweep(DtcSweep &s, const char *error) {
+  s.step = -1;
+  s.lastEnd = millis();
+  s.work.valid = error == nullptr;
+  s.work.updatedMs = millis();
+  if (error) strlcpy(s.work.error, error, sizeof(s.work.error));
+  outln("DTC current: " + codeList(s.work.current) + " | stored: " + codeList(s.work.stored) +
+        (error ? String(" (stopped: ") + error + ")" : ""));
+  portENTER_CRITICAL(&dtcMux);
+  dtc = s.work;
+  portEXIT_CRITICAL(&dtcMux);
+}
+
+// Returns false if the ECU stopped answering.
+static bool stepDtcSweep(DtcSweep &s) {
+  uint8_t table = s.step < DTC_PAGES ? 0x74 : 0x73;
+  uint8_t page = s.step % DTC_PAGES + 1;
+  uint8_t buf[64];
+  int n = readRequest(table, page, buf, sizeof(buf));
+  if (n <= 0) {
+    outln("DTC " + hex(&table, 1) + "page " + String(page) + ": no reply (code=" + String(n) + ")");
+    finishDtcSweep(s, "no reply");
+    return false;
+  }
+
+  String raw = hex(buf, n);
+  if (s.work.rawCount < 2 * DTC_PAGES) strlcpy(s.work.raw[s.work.rawCount++], raw.c_str(), 48);
+
+  // Payload after header + length, without checksum: d[0] = table, d[1] = page.
+  const uint8_t *d = buf + 2;
+  int len = n - 3;
+  bool any = false;
+  if (len >= 3 && d[0] == table && d[1] == page) {
+    for (int j = 3; j + 1 < len && j <= 7; j += 2) {
+      if (d[j] == 0) continue;
+      addCode(table == 0x74 ? s.work.current : s.work.stored, d[j], d[j + 1]);
+      any = true;
+    }
+  } else {
+    outln("DTC " + hex(&table, 1) + "page " + String(page) + ": unexpected reply " + raw);
+  }
+  if (s.verbose || any) outln("DTC " + hex(&table, 1) + "p" + String(page) + ": " + raw);
+
+  if (++s.step >= 2 * DTC_PAGES) finishDtcSweep(s, nullptr);
+  return true;
+}
+
 void klineTask(void *) {
   bool connected = false;
+  DtcSweep sweep;
   for (;;) {
     if (!connected) {
       // Keep showing the last failure reason while retrying.
       if (strcmp(live.status, "no-echo") != 0 && strcmp(live.status, "init-fail") != 0) setStatus("connecting");
+      sweep.step = -1;
       connected = wakeupECU();
       if (!connected) {
         delay(2000);
         continue;
       }
       scanTables();
+      startDtcSweep(sweep, true);  // log every raw page once per connection
     }
 
     uint8_t buf[64];
@@ -233,6 +349,12 @@ void klineTask(void *) {
       continue;
     }
     handleLiveData(buf, n);
+
+    if (sweep.step < 0 && millis() - sweep.lastEnd >= DTC_INTERVAL_MS) startDtcSweep(sweep, false);
+    if (sweep.step >= 0) {
+      delay(20);
+      stepDtcSweep(sweep);
+    }
     delay(100);
   }
 }
@@ -249,6 +371,34 @@ void handleData() {
            d.valid ? "true" : "false", d.status,
            (unsigned long)(d.valid ? millis() - d.updatedMs : 0),
            d.rpm, d.kmh, d.tps, d.ect, d.iat, d.batt);
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", json);
+}
+
+// {"valid":true,"age":1234,"error":"","current":["07-01"],"stored":[],"raw":["02 0C 74 01 ..."]}
+void handleDtc() {
+  static DtcState d;  // static: too big for the web server's stack
+  portENTER_CRITICAL(&dtcMux);
+  d = dtc;
+  portEXIT_CRITICAL(&dtcMux);
+
+  auto codes = [](const DtcList &list) {
+    String s = "[";
+    char b[10];
+    for (int i = 0; i < list.count; i++) {
+      snprintf(b, sizeof(b), "%s\"%02d-%02d\"", i ? "," : "", list.codes[i][0], list.codes[i][1]);
+      s += b;
+    }
+    return s + "]";
+  };
+
+  String json = "{\"valid\":" + String(d.valid ? "true" : "false") +
+                ",\"age\":" + String(d.updatedMs ? millis() - d.updatedMs : 0) +
+                ",\"error\":\"" + d.error + "\"" +
+                ",\"current\":" + codes(d.current) +
+                ",\"stored\":" + codes(d.stored) + ",\"raw\":[";
+  for (int i = 0; i < d.rawCount; i++) json += (i ? ",\"" : "\"") + String(d.raw[i]) + "\"";
+  json += "]}";
   server.sendHeader("Cache-Control", "no-store");
   server.send(200, "application/json", json);
 }
@@ -340,6 +490,7 @@ void setup() {
 
   server.on("/", []() { server.send_P(200, "text/html", DASHBOARD_HTML); });
   server.on("/data", handleData);
+  server.on("/dtc", handleDtc);
   server.begin();
   initEspNow();
 
