@@ -65,11 +65,16 @@ Kết quả quét các bảng trên Air Blade 2023:
 ## Mã lỗi (DTC)
 Cách đọc lấy từ phần mềm mã nguồn mở [HondaECU](https://github.com/Adeen117/HondaECU).
 
-**Đã kiểm chứng trên Air Blade 2023 (xe không có lỗi):**
-- ECU trả lời đủ 11 trang của cả hai bảng, ví dụ `02 0C 74 01 00 00 00 00 00 00 00 7D`.
-- Mỗi trang dài 12 byte và có đủ 3 ô mã. Checksum đều hợp lệ.
-
-**Chưa kiểm chứng:** vị trí byte của mã khi xe có lỗi thật. Phần này vẫn dựa trên HondaECU, cần đối chiếu với số lần nháy đèn FI khi xe gặp lỗi.
+**Đã kiểm chứng trên Air Blade 2023:**
+- **Xe không có lỗi:** ECU trả lời đủ 11 trang của cả hai bảng, ví dụ `02 0C 74 01 00 00 00 00 00 00 00 7D`. Mỗi trang dài 12 byte, có đủ 3 ô mã, checksum đều hợp lệ.
+- **Tạo lỗi thật:** tắt khóa, rút giắc cảm biến ở cổ ga, rồi bật khóa. Đèn FI **nháy 8 lần**, và ECU trả về:
+  ```
+  02 0C 74 01 00 08 01 00 00 00 00 74    ← lỗi hiện tại 8-1 (cảm biến bướm ga, điện áp thấp)
+  02 0C 73 01 00 08 01 00 00 00 00 75    ← lỗi đã lưu 8-1
+  ```
+  Mã nằm ở ô đầu tiên, đúng như dự đoán.
+- **Lỗi được ghi vào bảng "đã lưu" (`0x73`) ngay lập tức**, không đợi tới lần tắt khóa sau.
+- **Sau khi cắm lại giắc:** lỗi biến khỏi bảng `0x74` nhưng vẫn còn trong `0x73`. Đèn FI **vẫn sáng liên tục, kể cả khi nổ máy**, cho tới khi lỗi đã lưu được xóa.
 
 | Lệnh | Nội dung |
 |---|---|
@@ -94,7 +99,18 @@ Bảng đầy đủ kèm mô tả tiếng Việt nằm trong `firmware/kline-rea
 
 **Nháy đèn FI:** đèn FI chỉ nháy được mã chính (1 lần nháy dài = 10, 1 lần nháy ngắn = 1). Ví dụ lỗi 54-1 nháy 5 lần dài và 4 lần ngắn.
 
-**Chỉ đọc:** firmware **không** gửi lệnh xóa lỗi.
+**Xóa lỗi:** lệnh `72 05 60 03 26`, lấy từ HondaECU. Lệnh xóa toàn bộ lỗi hiện tại và lỗi đã lưu.
+- **Đã kiểm chứng trên Air Blade 2023:** ECU trả lời `02 05 60 01 98`. Lỗi 8-1 đã lưu biến mất, và đèn FI tắt.
+- HondaECU chỉ coi byte trả về `00` là thành công, nhưng ECU này trả `01` và vẫn xóa được. Vì vậy firmware coi cả `00` lẫn `01` là "đã nhận lệnh", rồi **đọc lại bảng `0x74`/`0x73`** để xác nhận không còn mã nào.
+- Firmware chỉ gửi lệnh khi **máy không nổ** (RPM = 0, khóa ở ON) và người dùng đã xác nhận trên trang web. Chỉ gửi lại khi ECU không trả lời.
+- **Không** dùng các mã con khác của nhóm `0x60`.
+
+Nếu lệnh không chạy được, xóa bằng **chân SCS**:
+1. Tắt khóa, nối chân SCS xuống GND qua 1kΩ.
+2. Bật khóa.
+3. Tháo dây SCS. Đèn FI sáng khoảng 5 giây.
+4. **Trong lúc đèn đang sáng**, nối lại chân SCS xuống GND.
+5. Đèn tắt rồi nháy là đã xóa xong.
 
 ## Chân SCS (4.7V) trên giắc DLC
 Giắc DLC còn một chân ở khoảng 4.7V: đó là **SCS (Service Check Signal)**. Nối chân này xuống GND qua điện trở 1kΩ thì đèn FI nháy mã lỗi. Dự án này không dùng chân SCS.

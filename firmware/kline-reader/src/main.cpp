@@ -26,6 +26,10 @@
 #ifndef K_TX_INVERTED
 #define K_TX_INVERTED 0
 #endif
+// Allow clearing fault codes from the web page (build with -DENABLE_DTC_CLEAR=0 for a read-only firmware).
+#ifndef ENABLE_DTC_CLEAR
+#define ENABLE_DTC_CLEAR 1
+#endif
 
 static const char *AP_SSID = "AB125";
 static const char *AP_PASS = "ab125kline";  // WPA2 needs at least 8 characters
@@ -241,6 +245,26 @@ struct DtcState {
 DtcState dtc = {};
 portMUX_TYPE dtcMux = portMUX_INITIALIZER_UNLOCKED;
 
+// Clearing fault codes: requested by POST /dtc/clear, carried out by the K-Line task.
+// Command from the HondaECU project: "72 05 60 03 <cks>". The Air Blade 2023 ECU answers
+// "02 05 60 01 98" and does clear the codes (HondaECU only expects 00), so the reply just
+// means "accepted"; success is decided by re-reading the fault tables afterwards.
+enum ClearState : uint8_t { CLEAR_IDLE, CLEAR_PENDING, CLEAR_SENT, CLEAR_OK, CLEAR_FAILED };
+struct ClearStatus {
+  ClearState state;
+  uint32_t atMs;  // when the state last changed
+  char msg[64];
+};
+ClearStatus clearStatus = {CLEAR_IDLE, 0, ""};
+
+static void setClear(ClearState state, const char *msg) {
+  portENTER_CRITICAL(&dtcMux);
+  clearStatus.state = state;
+  clearStatus.atMs = millis();
+  strlcpy(clearStatus.msg, msg, sizeof(clearStatus.msg));
+  portEXIT_CRITICAL(&dtcMux);
+}
+
 static void addCode(DtcList &list, uint8_t main, uint8_t sub) {
   for (int i = 0; i < list.count; i++)
     if (list.codes[i][0] == main && list.codes[i][1] == sub) return;
@@ -286,7 +310,16 @@ static void finishDtcSweep(DtcSweep &s, const char *error) {
         (error ? String(" (stopped: ") + error + ")" : ""));
   portENTER_CRITICAL(&dtcMux);
   dtc = s.work;
+  ClearStatus c = clearStatus;
   portEXIT_CRITICAL(&dtcMux);
+
+  // First sweep after a clear command decides whether it worked.
+  if (c.state == CLEAR_SENT) {
+    if (error) setClear(CLEAR_FAILED, "verify-failed");
+    else if (s.work.current.count == 0 && s.work.stored.count == 0) setClear(CLEAR_OK, c.msg);
+    else setClear(CLEAR_FAILED, "still-present");
+    outln(String("DTC clear result: ") + (clearStatus.state == CLEAR_OK ? "cleared" : clearStatus.msg));
+  }
 }
 
 // Returns false if the ECU stopped answering.
@@ -323,6 +356,37 @@ static bool stepDtcSweep(DtcSweep &s) {
   return true;
 }
 
+// Only "60 03" is sent: other sub-commands of 0x60 are unknown and never used.
+static void clearDtc() {
+  portENTER_CRITICAL(&liveMux);
+  uint16_t rpm = live.rpm;
+  bool valid = live.valid;
+  portEXIT_CRITICAL(&liveMux);
+  if (!valid || rpm != 0) {
+    outln("DTC clear refused: engine running or no ECU data");
+    setClear(CLEAR_FAILED, "engine-running");
+    return;
+  }
+
+  // Resend only when the ECU did not answer at all; any answer is final.
+  for (int attempt = 1; attempt <= 3; attempt++) {
+    uint8_t buf[64];
+    int n = readRequest(0x60, 0x03, buf, sizeof(buf));
+    String raw = n > 0 ? hex(buf, n) : "no reply (code=" + String(n) + ")";
+    outln("DTC clear attempt " + String(attempt) + ": " + raw);
+    if (n <= 0) {
+      setClear(CLEAR_FAILED, "no-reply");
+      delay(200);
+      continue;
+    }
+    const uint8_t *d = buf + 2;  // payload: d[0] = 0x60, d[1] = result (00 or 01 seen so far)
+    int len = n - 3;
+    if (len >= 2 && d[0] == 0x60 && d[1] <= 0x01) setClear(CLEAR_SENT, raw.c_str());
+    else setClear(CLEAR_FAILED, ("rejected: " + raw).c_str());
+    return;
+  }
+}
+
 void klineTask(void *) {
   bool connected = false;
   DtcSweep sweep;
@@ -349,6 +413,17 @@ void klineTask(void *) {
       continue;
     }
     handleLiveData(buf, n);
+
+    if (clearStatus.state == CLEAR_PENDING) {
+      if (millis() - clearStatus.atMs > 5000) {
+        // Requested while the ECU was not answering: never act on a stale request.
+        setClear(CLEAR_FAILED, "timeout");
+      } else {
+        delay(20);
+        clearDtc();
+        startDtcSweep(sweep, true);  // re-read right away so the page shows the result
+      }
+    }
 
     if (sweep.step < 0 && millis() - sweep.lastEnd >= DTC_INTERVAL_MS) startDtcSweep(sweep, false);
     if (sweep.step >= 0) {
@@ -398,9 +473,35 @@ void handleDtc() {
                 ",\"current\":" + codes(d.current) +
                 ",\"stored\":" + codes(d.stored) + ",\"raw\":[";
   for (int i = 0; i < d.rawCount; i++) json += (i ? ",\"" : "\"") + String(d.raw[i]) + "\"";
-  json += "]}";
+
+  portENTER_CRITICAL(&dtcMux);
+  ClearStatus c = clearStatus;
+  portEXIT_CRITICAL(&dtcMux);
+  static const char *names[] = {"idle", "pending", "sent", "ok", "failed"};
+  json += "],\"clearEnabled\":" + String(ENABLE_DTC_CLEAR ? "true" : "false") +
+          ",\"clear\":{\"state\":\"" + names[c.state] + "\",\"msg\":\"" + c.msg +
+          "\",\"age\":" + String(c.atMs ? millis() - c.atMs : 0) + "}}";
   server.sendHeader("Cache-Control", "no-store");
   server.send(200, "application/json", json);
+}
+
+// POST /dtc/clear: only with the key on, engine stopped and the ECU answering.
+void handleDtcClear() {
+  auto reply = [](int code, const char *state, const char *msg) {
+    server.send(code, "application/json", String("{\"state\":\"") + state + "\",\"msg\":\"" + msg + "\"}");
+  };
+  if (!ENABLE_DTC_CLEAR) return reply(403, "failed", "disabled");
+
+  portENTER_CRITICAL(&liveMux);
+  LiveData d = live;
+  portEXIT_CRITICAL(&liveMux);
+  if (!d.valid || millis() - d.updatedMs > 1500) return reply(409, "failed", "no-ecu");
+  if (d.rpm != 0) return reply(409, "failed", "engine-running");
+  if (clearStatus.state == CLEAR_PENDING || clearStatus.state == CLEAR_SENT) return reply(409, "pending", "busy");
+
+  outln("DTC clear requested from web page");
+  setClear(CLEAR_PENDING, "");
+  reply(202, "pending", "");
 }
 
 static uint8_t statusCode(const char *status) {
@@ -490,7 +591,8 @@ void setup() {
 
   server.on("/", []() { server.send_P(200, "text/html", DASHBOARD_HTML); });
   server.on("/data", handleData);
-  server.on("/dtc", handleDtc);
+  server.on("/dtc", HTTP_GET, handleDtc);
+  server.on("/dtc/clear", HTTP_POST, handleDtcClear);
   server.begin();
   initEspNow();
 

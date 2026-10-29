@@ -71,6 +71,11 @@ static const char DASHBOARD_HTML[] PROGMEM = R"HTML(<!doctype html>
   .code.cur .num { color:var(--bad); } .code.past .num { color:var(--warn); }
   .code .d { font-size:15px; } .code .b { font-size:13px; color:var(--muted); }
   .empty { background:var(--card); border-radius:14px; padding:14px; color:var(--muted); font-size:15px; }
+  #clearBox { display:none; margin-top:20px; }
+  #clearBtn { width:100%; padding:13px; border-radius:12px; background:#3a1416; color:var(--bad);
+              font-weight:600; font-size:16px; }
+  #clearBtn:disabled { opacity:.4; cursor:default; }
+  #clearMsg { margin:8px 0 0; }
   details { margin-top:22px; color:var(--muted); font-size:13px; }
   details pre { white-space:pre-wrap; word-break:break-all; margin-top:8px; font-size:12px;
                 background:var(--card); border-radius:10px; padding:10px; -webkit-user-select:text; user-select:text; }
@@ -103,12 +108,17 @@ static const char DASHBOARD_HTML[] PROGMEM = R"HTML(<!doctype html>
   <div class="meta" id="dtcMeta">Đang đọc mã lỗi từ ECU…</div>
   <div class="sec">ĐANG XẢY RA</div><div id="dtcCurrent"></div>
   <div class="sec">ĐÃ LƯU TRONG ECU</div><div id="dtcStored"></div>
-  <div class="meta" style="margin-top:18px">Chỉ đọc, không xóa lỗi. Đèn FI chỉ nháy được mã chính:
-    1 lần nháy dài = 10, 1 lần nháy ngắn = 1. Ý nghĩa mã theo bảng chung của Honda PGM-FI.</div>
+  <div id="clearBox">
+    <button class="btn" id="clearBtn" onclick="clearCodes()">Xóa lỗi</button>
+    <div class="meta" id="clearMsg"></div>
+  </div>
+  <div class="meta" style="margin-top:18px">Đèn FI chỉ nháy được mã chính: 1 lần nháy dài = 10,
+    1 lần nháy ngắn = 1. Ý nghĩa mã theo bảng chung của Honda PGM-FI.</div>
   <details><summary>Dữ liệu thô từ ECU</summary><pre id="dtcRaw">--</pre></details>
 </div>
 <script>
 const RPM_MAX = 10000;
+let lastLive = { at: 0, rpm: 0 };  // last fresh live reading, used to allow clearing codes
 const $ = id => document.getElementById(id);
 const STATUS = { connecting:"Đang kết nối ECU…", "no-echo":"Không có tín hiệu K-Line",
                  "init-fail":"ECU không phản hồi", lost:"Mất kết nối, thử lại…", starting:"Đang khởi động…" };
@@ -120,6 +130,7 @@ function render(d) {
   document.body.classList.toggle("stale", !fresh);
   if (!fresh) { setStatus(STATUS[d.status] || d.status, "warn"); return; }
   setStatus("Đang nhận dữ liệu", "ok");
+  lastLive = { at: Date.now(), rpm: d.rpm };
 
   $("kmh").textContent = d.kmh;
   $("rpm").textContent = d.rpm.toLocaleString("vi-VN");
@@ -202,7 +213,9 @@ function ago(ms) {
   return s < 60 ? `${s} giây trước` : `${Math.round(s / 60)} phút trước`;
 }
 
-function renderDtc() {
+function renderDtc() { renderDtcCodes(); renderClear(); }
+
+function renderDtcCodes() {
   const d = demo ? DTC_DEMO : dtcData;
   document.body.classList.toggle("dtc-demo", demo);
   $("demoBtn").classList.toggle("on", demo);
@@ -232,17 +245,78 @@ function renderDtc() {
 
 function toggleDemo() { demo = !demo; renderDtc(); }
 
+// ---------------- Clearing codes ----------------
+const CLEAR_MSG = {
+  "engine-running": "ECU từ chối vì máy đang nổ. Tắt máy, để khóa ở ON rồi thử lại.",
+  "no-ecu": "Chưa kết nối được ECU.",
+  "no-reply": "ECU không trả lời lệnh xóa. Có thể xe này không hỗ trợ; dùng cách chập chân SCS.",
+  "timeout": "Mất kết nối ECU trước khi gửi được lệnh. Thử lại.",
+  "busy": "Đang xóa, chờ chút…",
+  "disabled": "Firmware này tắt tính năng xóa lỗi.",
+  "still-present": "ECU đã nhận lệnh nhưng mã lỗi vẫn còn. Nếu lỗi đang xảy ra (ví dụ giắc chưa cắm chặt), ECU sẽ ghi lại ngay.",
+  "verify-failed": "Đã gửi lệnh nhưng không đọc lại được mã lỗi để kiểm tra. Xem lại sau vài giây."
+};
+let clearUntil = 0;     // poll /dtc quickly until this time after a clear request
+let clearLocalMsg = ""; // message from the POST reply, shown until /dtc reports a result
+
+function renderClear() {
+  const d = dtcData, box = $("clearBox"), btn = $("clearBtn"), msg = $("clearMsg");
+  const c = d && d.clear ? d.clear : { state:"idle", msg:"", age:0 };
+  const hasCodes = d && d.valid && (d.current.length || d.stored.length);
+  const recent = c.state !== "idle" && c.age < 60000;
+  box.style.display = !demo && d && d.clearEnabled && (hasCodes || recent) ? "block" : "none";
+
+  const engineOff = Date.now() - lastLive.at < 2000 && lastLive.rpm === 0;
+  const busy = c.state === "pending" || c.state === "sent";
+  btn.disabled = !engineOff || busy || !hasCodes;
+
+  let text = "";
+  if (c.state === "pending") text = "Đang gửi lệnh xóa tới ECU…";
+  else if (c.state === "sent") text = "ECU đã nhận lệnh xóa, đang đọc lại mã lỗi để kiểm tra…";
+  else if (recent && c.state === "ok")
+    text = "Đã xóa xong, ECU không còn mã lỗi. Tắt khóa rồi bật lại, đèn FI sẽ tắt.";
+  else if (recent && c.state === "failed")
+    text = CLEAR_MSG[c.msg] || `ECU từ chối lệnh xóa (${c.msg}).`;
+  else if (clearLocalMsg) text = clearLocalMsg;
+  else if (hasCodes && !engineOff) text = "Tắt máy, để khóa ở ON để xóa lỗi.";
+  else if (hasCodes) text = "Xóa toàn bộ mã lỗi (đang xảy ra và đã lưu) khỏi ECU.";
+  msg.textContent = text;
+}
+
+async function clearCodes() {
+  if (!confirm("Xóa toàn bộ mã lỗi khỏi ECU?\n\nMã lỗi đã lưu sẽ mất và đèn FI sẽ tắt. " +
+               "Nếu lỗi vẫn còn (ví dụ giắc chưa cắm chặt), ECU sẽ báo lại ngay.")) return;
+  clearLocalMsg = "Đang gửi yêu cầu…";
+  renderClear();
+  try {
+    const r = await fetch("/dtc/clear", { method:"POST" });
+    const j = await r.json();
+    clearLocalMsg = j.state === "pending" ? "" : (CLEAR_MSG[j.msg] || j.msg);
+  } catch (e) {
+    clearLocalMsg = "Mất WiFi tới ESP32.";
+  }
+  clearUntil = Date.now() + 15000;
+  pollDtc();
+}
+
 function route() { document.body.classList.toggle("show-dtc", location.hash === "#dtc"); }
 window.addEventListener("hashchange", route);
 route();
 
+let dtcTimer = null, dtcGen = 0;
 async function pollDtc() {
+  clearTimeout(dtcTimer);
+  const gen = ++dtcGen;  // a newer call supersedes this one (only one polling loop runs)
   try {
     const r = await fetch("/dtc", { cache:"no-store" });
-    dtcData = await r.json();
+    const j = await r.json();
+    if (gen !== dtcGen) return;
+    dtcData = j;
+    if (j.clear && j.clear.state !== "idle" && j.clear.age < 60000) clearLocalMsg = "";
   } catch (e) { /* keep the last result; the main status shows WiFi loss */ }
+  if (gen !== dtcGen) return;
   renderDtc();
-  setTimeout(pollDtc, 5000);
+  dtcTimer = setTimeout(pollDtc, Date.now() < clearUntil ? 1000 : 5000);
 }
 pollDtc();
 </script>

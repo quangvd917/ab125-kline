@@ -5,7 +5,7 @@ Firmware chạy trên **ESP32-C3 SuperMini** cùng mạch [L9637D](../../docs/ha
 Firmware làm 3 việc:
 - Đánh thức ECU và đọc **bảng `0x17`** khoảng 7 lần mỗi giây. Xem [protocol.md](../../docs/protocol.md).
 - Phát WiFi **AB125** (mật khẩu `ab125kline`) kèm trang web đồng hồ tại `http://192.168.4.1`. API `GET /data` trả về JSON.
-- Đọc **mã lỗi** (bảng `0x74` lỗi hiện tại, bảng `0x73` lỗi đã lưu) khi vừa kết nối ECU và sau đó mỗi 30 giây. Mỗi chu kỳ chỉ đọc một trang, nên không làm chậm việc đọc RPM. Kết quả xem ở mục **Mã lỗi** trên trang web, hoặc qua `GET /dtc`. Chỉ đọc, không xóa lỗi. Xem [protocol.md](../../docs/protocol.md#mã-lỗi-dtc).
+- Đọc **mã lỗi** (bảng `0x74` lỗi hiện tại, bảng `0x73` lỗi đã lưu) khi vừa kết nối ECU và sau đó mỗi 30 giây. Mỗi chu kỳ chỉ đọc một trang, nên không làm chậm việc đọc RPM. Kết quả xem ở mục **Mã lỗi** trên trang web, hoặc qua `GET /dtc`. Có nút **Xóa lỗi** (`POST /dtc/clear`), chỉ hoạt động khi máy không nổ. Xem [protocol.md](../../docs/protocol.md#mã-lỗi-dtc).
 - Gửi gói **ESP-NOW** `DashPacket` trên kênh 1 cho [dashboard CYD](../dashboard-cyd).
 
 Muốn đổi tên hoặc mật khẩu WiFi, sửa `AP_SSID` / `AP_PASS` trong `src/main.cpp`.
@@ -33,7 +33,12 @@ Script kiểm tra MAC của board, khai báo trong `../boards.local` (xem [../fl
 ## Trang mã lỗi
 Trên màn hình chính có ô **"Mã lỗi: …"**, bấm vào để mở trang chi tiết. Trang này chia hai mục **Đang xảy ra** và **Đã lưu trong ECU**. Mỗi lỗi hiện mã, mô tả tiếng Việt và số lần đèn FI nháy.
 
-Nút **Dữ liệu mẫu** hiện vài lỗi giả, gắn nhãn DEMO, để xem giao diện khi xe không có lỗi. Mục **Dữ liệu thô từ ECU** cho xem nguyên văn các trang ECU trả về.
+Nút **Dữ liệu mẫu** hiện vài lỗi giả, gắn nhãn DEMO, để xem giao diện khi xe không có lỗi.
+
+**Xóa lỗi:** nút này chỉ hiện khi đang có lỗi. Muốn xóa phải **tắt máy nhưng để khóa ở ON**, rồi xác nhận trong hộp thoại.
+- Firmware gửi lệnh `72 05 60 03`, chỉ gửi lại khi ECU không trả lời (tối đa 3 lần). Sau đó firmware đọc lại mã lỗi ngay: không còn mã nào thì báo **đã xóa**. Đã kiểm chứng trên xe: ECU trả lời `02 05 60 01 98` và xóa thành công.
+- Yêu cầu xóa gửi lúc ECU đang mất kết nối sẽ bị bỏ sau 5 giây, không tự chạy sau khi kết nối lại.
+- Muốn bản firmware **chỉ đọc**, thêm `-DENABLE_DTC_CLEAR=0` vào `build_flags`. Mục **Dữ liệu thô từ ECU** cho xem nguyên văn các trang ECU trả về.
 
 ## Đèn LED trạng thái (GPIO8 trên C3)
 | Đèn | Nghĩa |
